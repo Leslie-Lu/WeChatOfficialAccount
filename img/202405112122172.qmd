@@ -1,0 +1,228 @@
+---
+title: "最优分类阈值"
+date: 2024-05-11
+description: "分类问题中阈值的选择"
+image: "https://cdn.jsdelivr.net/gh/Leslie-Lu/WeChatOfficialAccount/img/202405112020810.png"
+categories:
+  - python
+  - machine learning
+format:
+  html: 
+    shift-heading-level-by: 1
+    include-in-header:
+      - text: |
+          <style type="text/css">
+          hr.dinkus {
+              width: 50px;
+              margin: 2em auto 2em;
+              border-top: 5px dotted #454545;
+          }
+          
+          div.column-margin+hr.dinkus {
+              margin: 1em auto 2em;
+          }
+          </style>
+# doi: 
+citation: true
+jupyter: python3
+---
+
+这里我们借助*scikit-learn*来探讨分类问题中阈值的选择。
+
+## 数据准备和参数选择
+
+首先是数据准备：
+
+```{python}
+#| label: libraries-n-things
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+
+from sklearn.datasets import load_breast_cancer
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import confusion_matrix
+
+np.set_printoptions(suppress=True, precision=8, linewidth=1000)
+pd.options.mode.chained_assignment = None
+pd.set_option('display.max_columns', None)
+pd.set_option('display.width', None)
+
+data = load_breast_cancer()
+X = data["data"]
+y = data["target"]
+
+Xtrain, Xvalid, ytrain, yvalid = train_test_split(X, y, test_size=.20, random_state=516)
+
+print(f"Xtrain.shape: {Xtrain.shape}")
+print(f"Xvalid.shape: {Xvalid.shape}")
+```
+
+模型我们这里选择*随机森林*。超参的选择，基于`GridSearchCV`，这里也不赘述。有一个点需要说明，由于使用的是肿瘤数据集，在这种情况下，我们更关注的是`recall`，即尽量减少假阴性的情况。因而，我们在训练模型时，也是将recall作为评价指标。
+
+```{python}
+#| label: train-model-rf
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import GridSearchCV
+
+param_grid = {
+    "n_estimators": [100, 150, 250],
+    "min_samples_leaf": [2, 3, 4],
+    "ccp_alpha": [0, .1, .2, .3]
+    }
+
+mdl = GridSearchCV(
+    RandomForestClassifier(random_state=516), 
+    param_grid, 
+    scoring="recall", 
+    cv=5
+    )
+
+mdl.fit(Xtrain, ytrain)
+
+print(f"best parameters: {mdl.best_params_}")
+```
+
+## 模型预测
+
+拿到模型后，自然我们可以开始预测：
+
+```{python}
+#| label: predict
+ypred = mdl.predict_proba(Xvalid)[:,1]
+ypred
+```
+
+这个时候，我们要讲的东西就来了。一般地，我们会选择0.50作为分类阈值，即大于0.50的为正类，小于0.50的为负类。
+
+```{python}
+#| label: threshold-0.50
+ypred = mdl.predict_proba(Xvalid)[:,1].reshape(-1, 1)
+yhat = mdl.predict(Xvalid).reshape(-1, 1)
+preds = np.concatenate([ypred, yhat], axis=1)
+print(preds)
+print(confusion_matrix(yvalid, yhat))
+```
+
+但是，这个阈值是可以调整的。我们可以通过调整阈值来达到不同的目的。比如，我们可以通过调整阈值来减少假阴性的情况，这在类别不平衡时尤为重要。
+
+## 阈值的选择
+
+我们介绍几种常用的方法。
+
+### 1. 阳性类别prevalance
+
+我们看下这个数据集中阳性类别的比例：
+
+```{python}
+#| label: positive-prevalance
+print(f"Proportion of positives in training set: {ytrain.sum() / ytrain.shape[0]:.2f}")
+```
+
+这个toy数据集很夸张哈，达到了0.62。在实际应用中，这个比例可能只有10%或者1%。这里我们只是拿它示例哈，用这个prevalance来作为阈值。
+
+```{python}
+#| label: threshold-prevalance
+thresh = 1- ytrain.sum() / ytrain.shape[0]
+yhat = np.where(ypred <= thresh, 0, 1)
+print(confusion_matrix(yvalid, yhat))
+```
+
+考虑prevalance的方法，可以在类别不平衡的情况下，减少假阴性的情况。
+
+### 2. 最优F1指数
+
+F1指数是precision和recall的调和平均数。我们可以通过最大F1指数来选择最优的阈值。
+
+```{python}
+#| label: threshold-f1
+#| echo: false
+from sklearn.metrics import precision_recall_curve
+p, r, thresh = precision_recall_curve(yvalid, ypred)
+f1 = 2 * (p * r) / (p + r)
+
+best_thresh = thresh[np.argmax(f1)]
+print(f"Threshold using optimal f1-score: {best_thresh:,.3f}.")
+```
+
+F1最高为0.471，我们采用它来进行预测：
+
+```{python}
+#| label: threshold-f1-predict
+thresh = .471
+yhat = np.where(ypred <= thresh, 0, 1)
+print(confusion_matrix(yvalid, yhat))
+```
+
+### 3. ROC曲线
+
+我们可以通过[ROC曲线](https://mp.weixin.qq.com/s/Zw85hAdx7VdwCioG5NwHQw)来选择最优的阈值。ROC曲线下的面积AUC越大，说明模型越好。我们可以选择ROC曲线最靠近左上角的点作为最优阈值。
+
+```{python}
+#| label: threshold-roc
+#| fig-align: center
+#| echo: false
+from sklearn.metrics import RocCurveDisplay
+roc_disp = RocCurveDisplay.from_predictions(
+    yvalid, ypred, name="RandomForestClassifier", color="#191964"
+    )
+roc_disp.ax_.set_title("ROC curve", fontsize=9)
+roc_disp.ax_.grid(True)
+plt.show()
+```
+
+### 4. PRC曲线
+
+PRC曲线是[precision-recall曲线](https://mp.weixin.qq.com/s/Zw85hAdx7VdwCioG5NwHQw)。相比于ROC曲线，PRC曲线更适合类别不平衡的情况。我们主要选择PRC曲线最靠近右上角的点作为最优阈值。
+
+```{python}
+#| label: threshold-prc
+#| fig-align: center
+#| echo: false
+from sklearn.metrics import PrecisionRecallDisplay
+pr_disp = PrecisionRecallDisplay.from_predictions(
+    yvalid, ypred, name="RandomForestClassifier", color="#CD0066"
+    )
+pr_disp.ax_.set_title("Precision-Recall curve", fontsize=9)
+pr_disp.ax_.grid(True)
+plt.show()
+
+p, r, thresh = precision_recall_curve(yvalid, ypred)
+best_thresh = thresh[np.where(r >= .95)[-1][-1]]
+print(f"Selected threshold using precision-recall curve: {best_thresh:,.3f}.")
+```
+
+### 5. 分别关注precision和recall
+
+我们可以通过调整阈值来分别关注precision和recall。比如，我们可以通过调整阈值来提高recall，减少假阴性的情况。
+
+```{python}
+#| label: threshold-pre-recall
+#| fig-align: center
+#| echo: false
+p, r, thresh = precision_recall_curve(yvalid, ypred)
+p, r = p[:-1], r[:-1]
+
+fig, ax =  plt.subplots(1, 1, figsize=(6.5, 4), tight_layout=True)
+ax.set_title("precision & recall vs. threshold", fontsize=10)
+ax.plot(thresh, p, color="red", linewidth=1.25, label="precision")
+ax.plot(thresh, r, color="blue", linewidth=1.25, label="recall")
+ax.set_xlabel("threshold", fontsize=8)
+# ax.set_xticks(np.arange(tmax+1))
+ax.tick_params(axis="x", which="major", direction="in", labelsize=8)
+ax.tick_params(axis="y", which="major", direction="in", labelsize=8)
+ax.xaxis.set_ticks_position("none")
+ax.yaxis.set_ticks_position("none")
+ax.grid(True)
+ax.legend(loc="upper right", fancybox=True, framealpha=1, fontsize="medium")
+
+plt.show()
+```
+
+<br>
+
+代码已经放进了[星球](https://mp.weixin.qq.com/s/4IR-KMAZ-q2VbI0Fz4fYRg)里。
+
+<br>
+
+#### Did you find this page helpful? Consider sharing it 🙌
